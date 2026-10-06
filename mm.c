@@ -67,35 +67,108 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-// void find_fit() {
+static void *find_fit(size_t block_size) {
+    char *heap_start = mem_heap_lo();       // 힙 시작 주소
+    char *cur_pos = heap_start + WSIZE + DSIZE + WSIZE;    // 일반 블록 페이로드 주소
 
-// }
+    while (GET_SIZE(HDRP(cur_pos)) != 0) {      // 에필로그까지 탐색
+        if (GET_ALLOC(HDRP(cur_pos)) == 0 && GET_SIZE(HDRP(cur_pos)) >= block_size) {       // 가용 상태고 크기가 충분한지 확인
+            return cur_pos;     // 처음 찾은 적합한 블록 주소 반환
+        }
+        cur_pos = NEXT_BLKP(cur_pos);       // 다음 블록 이동
+    }
+    return NULL;        // 가용 블록 못참음(힙 확장 필요)
+}
 
-// void place() {
+static void place(void *ptr, size_t block_size) {
+    size_t cur_size = GET_SIZE(HDRP(ptr));
+    size_t remaining_size = cur_size - block_size;      // 할당 후 남는 크기
 
-// }
+    if (remaining_size >= 16) {
+        PUT(HDRP(ptr), PACK(block_size, 1));        // 앞쪽 할당 블록 헤더 기록
+        PUT(FTRP(ptr), PACK(block_size, 1));        // 푸터 기록
 
-// void coalesce() {
+        char *remaning_pos = (char *)ptr + block_size;      // 뒤쪽 가용 블록의 페이로드 주소
+
+        PUT(HDRP(remaning_pos), PACK(remaining_size, 0));        // 남은 가용 블록 헤더 기록
+        PUT(FTRP(remaning_pos), PACK(remaining_size, 0));        // 남은 가용 블록 푸터 기록
+    } else {
+        PUT(HDRP(ptr), PACK(cur_size, 1));        // 원래 전체 크기 유지하고 헤더 할당 상태 변경
+        PUT(FTRP(ptr), PACK(cur_size, 1));        // 푸터에도 동일한 크기와 할당 상태 기록
+    }
+}
+
+static void *coalesce(void *ptr) {
+
+    size_t cur_size = GET_SIZE(HDRP(ptr));
+
+    // 앞뒤 블록 할당 상태 확인하기
+    char *prev_pos = PREV_BLKP(ptr);
+    char *next_pos = NEXT_BLKP(ptr);
+
+    // 병합 전에 앞뒤 블록 할당 상태 저장
+    int prev_alloc = GET_ALLOC(HDRP(prev_pos));
+    int next_alloc = GET_ALLOC(HDRP(next_pos));
+
+    // 인접한 가용 블록이 있으면 병합
+    if (prev_alloc == 1 && next_alloc == 1)
+    {
+        // 모두 할당이니까 종료
+        return ptr;
+    } else if (prev_alloc == 1 && next_alloc == 0){
+        // 현재 블록과 다음 가용 블록 전체 크기
+        size_t merge_size = cur_size + GET_SIZE(HDRP(next_pos));
     
-// }
+        // 현재 블록 헤더와 다음 블록 푸터 합산 크기 기록
+        char *merge_footer = FTRP(next_pos);
+        PUT(HDRP(ptr), PACK(merge_size, 0));
+        PUT(merge_footer, PACK(merge_size, 0));
+    } else if (prev_alloc == 0 && next_alloc == 1){
+        // 이전 가용 블록이랑 현재 블록의 전체 크기 합산
+        size_t merge_size = GET_SIZE(HDRP(prev_pos)) + cur_size;
 
-// void extend_heap(size_t words) {
-//     char *cur_po;
-//     size_t size;
+        // 헤더 변경 전에 병합 영역 마지막 푸터 주소 저장
+        char *merge_footer = FTRP(ptr);
 
-//     size = (words%2) ? (words+1) * WSIZE : words * WSIZE;
-//     if ((long)(cur_po = mem_sbrk(size)) == -1)
-//     {
-//         return NULL;
-//     }
+        // 이전 블록 헤더랑 현재 블록 푸터 합산 크기 기록
+        PUT(HDRP(prev_pos), PACK(merge_size, 0));
+        PUT(merge_footer, PACK(merge_size, 0));
 
-//     PUT(HDRP(cur_po), PACK(size, 0));
-//     PUT(FTRP(cur_po), PACK(size, 0));
-//     PUT(HDRP(NEXT_BLKP(cur_po)), PACK(0, 1));
+        // 추가: 병합 결과는 이전 블록에서 시작하므로 반환할 주소 변경
+        ptr = prev_pos;
+    } else{
+        // 이전/현재/다음 모두 크기 합산
+        size_t merge_size = GET_SIZE(HDRP(prev_pos)) + cur_size + GET_SIZE(HDRP(next_pos));
+        
+        char *merge_footer = FTRP(next_pos);
 
-//     return coalesce(cur_po);
+        PUT(HDRP(prev_pos), PACK(merge_size, 0));
+        PUT(merge_footer, PACK(merge_size, 0));
+
+        // 추가: 병합 결과는 이전 블록에서 시작하므로 반환할 주소 변경
+        ptr = prev_pos;
+    }
+
+    return ptr;
+}
+
+static void *extend_heap(size_t words) {
+    char *cur_po;
+    size_t size;
+
+    size = (words%2) ? (words+1) * WSIZE : words * WSIZE;
+    if ((long)(cur_po = mem_sbrk(size)) == -1)
+    {
+        return NULL;
+    }
+
+    PUT(HDRP(cur_po), PACK(size, 0));
+    PUT(FTRP(cur_po), PACK(size, 0));
+    PUT(HDRP(NEXT_BLKP(cur_po)), PACK(0, 1));
+
+    return coalesce(cur_po);
     
-// }   
+}   
 
 
 /* 
@@ -136,138 +209,44 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-    // 예외 처리: 요청 크기가 0이면 NULL 반환하자
     if (size == 0)
     {
         return NULL;
     }
-    // 페이로드 기준 헤더 푸터 고려해 ALIGN 활용해 8배수 크기로 맞춰주기
-    size_t block_size = ALIGN(size + DSIZE);
-    // 시작 주소 가져오기
-    char *heap_start = mem_heap_lo();
-    // 기준 주소 페이로드 위치 받아오기
-    // 정렬공간 WSIZE + 프롤로그 DSIZE + 가용블록 헤더 WSIZE
-    char *cur_pos = heap_start + WSIZE + DSIZE + WSIZE;    // 일반 블록의 페이로드 주소
-    // 에필로그까지 블록 탐색해서 공간 찾자
-    while (GET_SIZE(HDRP(cur_pos)) != 0)
-    {   
-        // 블록 순회하면서 할당가능한 블록인지 검사하고 block_size크기 이상인지도 확인하고
-        if (GET_ALLOC(HDRP(cur_pos)) == 0 && GET_SIZE(HDRP(cur_pos)) >= block_size)
-        {
-            break;
-        }
-        else cur_pos = NEXT_BLKP(cur_pos);
-    }
 
-    size_t cur_size = GET_SIZE(HDRP(cur_pos));
+    size_t block_size = ALIGN(size + DSIZE);        // 헤더와 푸터 포함 전체 크기 8배수로 올림
+    char *cur_pos = find_fit(block_size);
 
-     // 충분히 큰 가용 블록을 찾지 못한 경우 힙 확장
-    if (cur_size == 0) 
-    {
-        // 확장할 크기 결정하기
-        size_t extend_size = MAX(block_size, CHUNKSIZE);
-        // mem_sbrk호출해서 실패검사하기
-        char *new_pos = mem_sbrk(extend_size);    
-        if (new_pos == (void *)-1){
+    if (cur_pos == NULL) {      // 실패한 경우에만 힙 확장
+        size_t extend_size = MAX(block_size, CHUNKSIZE);        // 필요한 크기와 기본 확장 크기 중 큰 값 선택
+        cur_pos = extend_heap(extend_size / WSIZE);     // 워드 단위로 확장하고 병합 결과 주소를 받음
+
+        if (cur_pos == NULL) {      // 확장 실패 시 NULL 반환
             return NULL;
         }
-        // 새 블록 페이로드 주소 탐색 포인터로 저장
-        cur_pos = new_pos;
-        // 기존 에필로그 위치를 새 가용 블록 헤더로 만들기
-        PUT(HDRP(cur_pos), PACK(extend_size, 0));
-        // 새 가용블록 푸터 만들기
-        PUT(FTRP(cur_pos), PACK(extend_size, 0));
-        //새 가용블록 뒤에 에필로그 새로 만들기
-        char *epil_header = cur_pos + extend_size - WSIZE;
-        PUT(epil_header, PACK(0, 1));
-        // 확장으로 확보한 블록 전체 크기 저장
-        cur_size = extend_size;
     }
-
-    // 가용 사이즈에서 block_size뺸 만큼 일단 기록해두고
-    size_t remaining_size = cur_size - block_size;
-    if (remaining_size >= 16){  // 남는 공간이 최소크기 이상이면 분할하기
-        // 할당 블록의 헤더에 크기와 할당 상태 기록
-        PUT(HDRP(cur_pos), PACK(block_size, 1));
-        // 변경된 헤더 크기를 기준으로 앞쪽 블록의 푸터를 찾아 같은 값 기록하기
-        PUT(FTRP(cur_pos), PACK(block_size, 1));
-        // 뒤쪽 남는 블록의 페이로드 주소 계산
-        char *remaining_pos = cur_pos + block_size;
-        // 뒤 가용 블록 헤더에 남은 크기랑 가용상태 기록
-        PUT(HDRP(remaining_pos), PACK(remaining_size, 0));
-        // 푸터도 똑같이 채워주기
-        PUT(FTRP(remaining_pos), PACK(remaining_size, 0));
-    }
-    else{   // 남는 공간이 최소사이즈 보다 작으면 분할 X
-        // 남는 공간 작으니까 원래 블록 전체 크기 유지하면서(분할x) 헤더에 값 할당
-        PUT(HDRP(cur_pos), PACK(cur_size, 1));
-        // 푸터에도 같은 크기와 할당 상태 기록
-        PUT(FTRP(cur_pos), PACK(cur_size, 1));
-    }
-    // 사용자한테 할당 블록의 페이로드 주소 반환
-    return cur_pos;
-}
+    place(cur_pos, block_size);     // 선택한 블록을 할당하고 필요하면 분할
+    return cur_pos;     // 사용자에게 페이로드 주소 반환
+} 
 
 /*
  * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr)
 {
-    // 인자인 ptr이 오염되지 않은 진짜 ptr인가?를 확인해보는 것도 좋을 듯
 
-    // ptr이 NULL이면 종료
     if (ptr == 0)
     {
         return;
     }
-
-    // 현재 블록의 전체 크기를 헤더에서 읽기
-    size_t cur_size = GET_SIZE(HDRP(ptr));
-
-    // 현재 블록의 헤더와 푸터에 기존 크기와 가용 상태 0을 기록하자
-    PUT(HDRP(ptr), PACK(cur_size, 0));
-    PUT(FTRP(ptr), PACK(cur_size, 0));      // 굳이 할필요 없음
-
-    // 앞뒤 블록 할당 상태 확인하기
-    char *prev_pos = PREV_BLKP(ptr);
-    char *next_pos = NEXT_BLKP(ptr);
-
-    // 병합 전에 앞뒤 블록 할당 상태 저장
-    int prev_alloc = GET_ALLOC(HDRP(prev_pos));
-    int next_alloc = GET_ALLOC(HDRP(next_pos));
-
-    // 인접한 가용 블록이 있으면 병합
-    if (prev_alloc == 1 && next_alloc == 1)
-    {
-        // 모두 할당이니까 종료
-        return;
-    } else if (prev_alloc == 1 && next_alloc == 0){
-        // 현재 블록과 다음 가용 블록 전체 크기
-        size_t merge_size = cur_size + GET_SIZE(HDRP(next_pos));
     
-        // 현재 블록 헤더와 다음 블록 푸터 합산 크기 기록
-        char *merge_footer = FTRP(next_pos);
-        PUT(HDRP(ptr), PACK(merge_size, 0));
-        PUT(merge_footer, PACK(merge_size, 0));
-    } else if (prev_alloc == 0 && next_alloc == 1){
-        // 이전 가용 블록이랑 현재 블록의 전체 크기 합산
-        size_t merge_size = GET_SIZE(HDRP(prev_pos)) + cur_size;
+    size_t cur_size = GET_SIZE(HDRP(ptr));      // 현재 블록의 전체 크기를 헤더에서 읽기
 
-        // 헤더 변경 전에 병합 영역 마지막 푸터 주소 저장
-        char *merge_footer = FTRP(ptr);
+    PUT(HDRP(ptr), PACK(cur_size, 0));      // 현재 블록의 헤더 기존 크기와 가용 상태 갱신
+    PUT(FTRP(ptr), PACK(cur_size, 0));      // 현재 블록의 푸터도 기존 크기와 가용 상태로 갱신
 
-        // 이전 블록 헤더랑 현재 블록 푸터 합산 크기 기록
-        PUT(HDRP(prev_pos), PACK(merge_size, 0));
-        PUT(merge_footer, PACK(merge_size, 0));
-    } else{
-        // 이전/현재/다음 모두 크기 합산
-        size_t merge_size = GET_SIZE(HDRP(prev_pos)) + cur_size + GET_SIZE(HDRP(next_pos));
-        
-        char *merge_footer = FTRP(next_pos);
+    coalesce(ptr);
 
-        PUT(HDRP(prev_pos), PACK(merge_size, 0));
-        PUT(merge_footer, PACK(merge_size, 0));
-    }
 }
 
 /*
@@ -275,45 +254,50 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    // ptr에 공간 없으니까 size만큼 공간 할당
-    if (ptr == NULL)
-    {
+    if (ptr == NULL) {
         return mm_malloc(size);
     }
-    // 요청 크기가 0이면 기존 블록 해제하고 NULL 반환
-    if (size == 0)
-    {
+    if (size == 0) {
         mm_free(ptr);
         return NULL;
     }
     
-    // 기존 블록의 전체 크기는 주소가 아니라 바이트 수니까 size_t로 저장
-    size_t cur_size = GET_SIZE(HDRP(ptr));
-    // 헤더랑 푸터 제외한 기존 페이로드 용량 계산
-    // 정렬용 공간도 포함하므로 원래 요청 크기와는 다를 수 있음
-    size_t use_size = cur_size - DSIZE;
+    size_t cur_size = GET_SIZE(HDRP(ptr));      // 기존 블록의 전체 크기는 주소가 아니라 바이트 수니까 size_t로 저장
+    size_t use_size = cur_size - DSIZE;     // 헤더랑 푸터 제외한 기존 페이로드 용량 계산  정렬용 공간도 포함하므로 원래 요청 크기와는 다를 수 있음
 
-    // 요청 크기만큼 새 블록을 할당하고 페이로드 주소 받음
-    char *cur_pos = mm_malloc(size);
-    // 새 블록 할당 실패하면 기존 블록 유지하고 NULL반환
-    if (cur_pos == NULL)
-    {
+    if (size <= use_size) {     // 기존 페이로드 용량으로 새 요청을 수용할 수 있으면 재할당과 복사 생략
+        return ptr;
+    }
+
+    size_t block_size = ALIGN(size + DSIZE);        // 새 요청에 필요한 전체 블록 크기
+    char *next_po = NEXT_BLKP(ptr);       // 다음 블록의 페이로드 주소
+
+    if (GET_ALLOC(HDRP(next_po)) == 0) {
+        size_t merge_size = GET_SIZE(HDRP(ptr)) + GET_SIZE(HDRP(next_po));      // 두 블록의 전체 크기 합산
+        if (merge_size >= block_size) {
+            char *merge_footer = FTRP(next_po);     // 헤더 변경 전에 합쳐진 영역의 마지막 푸터 저장
+
+            PUT(HDRP(ptr), PACK(merge_size, 1));        // 현재 블록 헤더를 합산 크기로 갱신
+            PUT(merge_footer, PACK(merge_size, 1));        // 합쳐진 영역 푸터 갱신
+
+            place(ptr, block_size);     // 필요한 크기만 할당하고 충분한 여유 공간은 분할
+            return ptr;     // 데이터 이동 없이 기존 페이로드 주소 반환
+        }
+    }
+    
+    char *cur_pos = mm_malloc(size);        // 요청 크기만큼 새 블록을 할당하고 페이로드 주소 받음
+    if (cur_pos == NULL){
         return NULL;
     }
     
-    // 기존 페이로드 용량과 새 요청 크기 중 작은 값을 복사 크기로 결정하고
-    size_t copy_size = use_size;
-    if (size < copy_size)
-    {
+    size_t copy_size = use_size;        // 기존 페이로드 용량과 새 요청 크기 중 작은 값을 복사 크기로 결정하고
+    if (size < copy_size) {
         copy_size = size;
     }
     
-    // memcpy로 기존 페이로드에서 새 페이로드로 데이터 복사
-    memcpy(cur_pos, ptr, copy_size);
+    memcpy(cur_pos, ptr, copy_size);        // memcpy로 기존 페이로드에서 새 페이로드로 데이터 복사
+    mm_free(ptr);       // 복사 끝나면 기존 블록 해제
 
-    // 복사 끝나면 기존 블록 해제
-    mm_free(ptr);
-
-    // 데이터를 복사한 새 블록의 페이로드 주소 반환
-    return cur_pos;
+    return cur_pos;     // 데이터를 복사한 새 블록의 페이로드 주소 반환
+    
 }
