@@ -67,17 +67,42 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-static void *find_fit(size_t block_size) {
-    char *heap_start = mem_heap_lo();       // 힙 시작 주소
-    char *cur_pos = heap_start + WSIZE + DSIZE + WSIZE;    // 일반 블록 페이로드 주소
+static char *search_pos = NULL;     // 함수 호출 사이에 다음 탐색 시작 주소 유지
 
-    while (GET_SIZE(HDRP(cur_pos)) != 0) {      // 에필로그까지 탐색
-        if (GET_ALLOC(HDRP(cur_pos)) == 0 && GET_SIZE(HDRP(cur_pos)) >= block_size) {       // 가용 상태고 크기가 충분한지 확인
-            return cur_pos;     // 처음 찾은 적합한 블록 주소 반환
+static void *find_fit(size_t block_size)
+{
+    char *heap_start = mem_heap_lo();       // 힙 시작 주소
+    char *start_pos = search_pos;           // 이번 탐색 시작 위치 저장
+    char *cur_pos = start_pos;              // 저장된 블록부터 탐색
+
+    while (GET_SIZE(HDRP(cur_pos)) != 0)    // 시작 위치부터 에필로그까지 탐색
+    {
+        if (GET_ALLOC(HDRP(cur_pos)) == 0 &&
+            GET_SIZE(HDRP(cur_pos)) >= block_size)
+        {
+            search_pos = cur_pos;          // 다음 탐색 위치 갱신
+            return cur_pos;                // 적합한 블록 주소 반환
         }
-        cur_pos = NEXT_BLKP(cur_pos);       // 다음 블록 이동
+
+        cur_pos = NEXT_BLKP(cur_pos);      // 다음 블록으로 이동
+    }                                      // 첫 번째 반복문 종료
+
+    cur_pos = heap_start + WSIZE + DSIZE + WSIZE; // 첫 일반 블록으로 돌아감
+
+    while (cur_pos != start_pos &&
+           GET_SIZE(HDRP(cur_pos)) != 0)    // 처음부터 시작 위치 직전까지 탐색
+    {
+        if (GET_ALLOC(HDRP(cur_pos)) == 0 &&
+            GET_SIZE(HDRP(cur_pos)) >= block_size)
+        {
+            search_pos = cur_pos;          // 다음 탐색 위치 갱신
+            return cur_pos;                // 적합한 블록 주소 반환
+        }
+
+        cur_pos = NEXT_BLKP(cur_pos);      // 다음 블록으로 이동
     }
-    return NULL;        // 가용 블록 못참음(힙 확장 필요)
+
+    return NULL;                           // 한 바퀴 탐색했지만 적합한 블록 없음
 }
 
 static void place(void *ptr, size_t block_size) {
@@ -136,7 +161,7 @@ static void *coalesce(void *ptr) {
 
         // 추가: 병합 결과는 이전 블록에서 시작하므로 반환할 주소 변경
         ptr = prev_pos;
-    } else{
+    } else {
         // 이전/현재/다음 모두 크기 합산
         size_t merge_size = GET_SIZE(HDRP(prev_pos)) + cur_size + GET_SIZE(HDRP(next_pos));
         
@@ -149,6 +174,10 @@ static void *coalesce(void *ptr) {
         ptr = prev_pos;
     }
 
+    if (search_pos >= (char *)ptr && search_pos < NEXT_BLKP(ptr)) {     // 저장된 탐색 위치가 병합 결과 블록 내부에 있으면 시작 주소로 보정
+        search_pos = (char *)ptr;       // 병합된 블록의 페이로드 시작 주소
+    }
+
     return ptr;
 }
 
@@ -157,8 +186,7 @@ static void *extend_heap(size_t words) {
     size_t size;
 
     size = (words%2) ? (words+1) * WSIZE : words * WSIZE;
-    if ((long)(cur_po = mem_sbrk(size)) == -1)
-    {
+    if ((long)(cur_po = mem_sbrk(size)) == -1) {
         return NULL;
     }
 
@@ -185,6 +213,8 @@ int mm_init(void)
     PUT(heap_start, 0);
     // 정렬 공간 뒤 4바이트 옮긴 곳인 프롤로그 헤드 주소 위치 받자
     char *cur_pos = heap_start + WSIZE;
+    search_pos = heap_start + WSIZE + DSIZE + WSIZE;
+
     // 프롤로그 헤더 4바이트 할당하자
     PUT(cur_pos, PACK(DSIZE, 1));   // 프롤로그 헤더 값들 넣고
     cur_pos = cur_pos + WSIZE;    // 프롤로그 푸터로 이동
@@ -209,8 +239,7 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-    if (size == 0)
-    {
+    if (size == 0) {
         return NULL;
     }
 
@@ -280,10 +309,42 @@ void *mm_realloc(void *ptr, size_t size)
             PUT(HDRP(ptr), PACK(merge_size, 1));        // 현재 블록 헤더를 합산 크기로 갱신
             PUT(merge_footer, PACK(merge_size, 1));        // 합쳐진 영역 푸터 갱신
 
+            if (search_pos >= (char *)ptr && search_pos < NEXT_BLKP(ptr)) {     // 탐색 위치가 흡수된 영역 안에 있으면 현재 블록 시작으로 보정
+                search_pos = (char *)ptr;       // 유효한 페이로드 시작 주소로 변경
+            }
+            
             place(ptr, block_size);     // 필요한 크기만 할당하고 충분한 여유 공간은 분할
             return ptr;     // 데이터 이동 없이 기존 페이로드 주소 반환
         }
     }
+
+    /*      앞쪽까지도 확인하는 코드이나 현재 코드에서는 오히려 util 성능 하락 (66점)
+    char *prev_po = PREV_BLKP(ptr);        // 이전 블록의 페이로드 주소 구하기
+
+    if (GET_ALLOC(HDRP(prev_po)) == 0) {
+        size_t merge_size = GET_SIZE(HDRP(prev_po)) + cur_size;     // 이전 + 현재 전체 크기
+        char *merge_footer = FTRP(ptr);     // 병합 영역의 푸터는 현재 블록의 푸터
+
+        if (merge_size < block_size && GET_ALLOC(HDRP(next_po)) == 0) {        // 크기가 부족하고 다음 블록도 가용이면 포함
+            merge_size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));       // 다음 블록 크기까지 합산
+            merge_footer = FTRP(next_po);       // 병합 영역 끝을 다음 블록 푸터로 변경
+        }
+
+        if (merge_size >= block_size) {     // 합산 크기가 block_size 이상이면
+            memmove(prev_po, ptr, use_size);        // 겹칠 수 있는 기존 데이터들 먼저 앞쪽으로 이동
+
+            PUT(HDRP(prev_po), PACK(merge_size, 1));
+            PUT(merge_footer, PACK(merge_size, 1));
+
+            place(prev_po, block_size);     // 필요한 크기를 할당하고 남은 공간 분할
+
+            if (merge_size - block_size >= 16) {        // 분할로 가용 블록 생겼으면
+                coalesce(NEXT_BLKP(prev_po));       // 남겨 둔 뒤쪽 가용 블록과 인접할 수 있으므로 병합
+            }
+                return prev_po;     // 이동한 데이터의 새 페이로드 주소 반환
+        }
+    }
+    */
     
     char *cur_pos = mm_malloc(size);        // 요청 크기만큼 새 블록을 할당하고 페이로드 주소 받음
     if (cur_pos == NULL){
@@ -299,5 +360,5 @@ void *mm_realloc(void *ptr, size_t size)
     mm_free(ptr);       // 복사 끝나면 기존 블록 해제
 
     return cur_pos;     // 데이터를 복사한 새 블록의 페이로드 주소 반환
-    
+
 }
