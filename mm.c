@@ -67,7 +67,7 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-static char *search_pos = NULL;     // 함수 호출 사이에 다음 탐색 시작 주소 유지
+static char *search_pos = NULL;     // 함수 호출 사이에 다음 탐색 시작 주소 유지 (지역변수면 함수 소멸하며 사라지기 때문에 함수 밖 선언)
 
 static void *find_fit(size_t block_size)
 {
@@ -300,6 +300,27 @@ void *mm_realloc(void *ptr, size_t size)
 
     size_t block_size = ALIGN(size + DSIZE);        // 새 요청에 필요한 전체 블록 크기
     char *next_po = NEXT_BLKP(ptr);       // 다음 블록의 페이로드 주소
+    
+    size_t next_size = GET_SIZE(HDRP(next_po));     // 다음 블록 전체 크기(에필로그면 0)
+    size_t available_size = cur_size;       // 현재 위치에서 확보할 수 있는 전체 크기
+    int heap_end = (next_size == 0);        // 현재 블록 바로 뒤가 에필로그인지 확인
+
+    if (GET_ALLOC(HDRP(next_po)) == 0) {
+        available_size += next_size;        // 다음 가용 블록까지 합산
+        heap_end = (GET_SIZE(HDRP(NEXT_BLKP(ptr))) == 0);        // 다음 가용 블록 뒤가 에필로그인지 확인
+    }
+
+    if (heap_end && available_size < block_size) {
+        size_t extend_size = block_size - available_size;       // 요청을 충족하는 데 부족한 사이즈 계산
+        extend_size = MAX(extend_size, 2*DSIZE);        // 새 가용 블록은 최소 16바이트 확보
+        
+        if (extend_heap(extend_size / WSIZE) != NULL) {
+            next_po = NEXT_BLKP(ptr);       // 확장과 병합 후 현재 블록 바로 뒤의 가용 블록 주소 다시 확인
+        }
+        
+    }
+    
+    
 
     if (GET_ALLOC(HDRP(next_po)) == 0) {
         size_t merge_size = GET_SIZE(HDRP(ptr)) + GET_SIZE(HDRP(next_po));      // 두 블록의 전체 크기 합산
@@ -318,7 +339,7 @@ void *mm_realloc(void *ptr, size_t size)
         }
     }
 
-    /*      앞쪽까지도 확인하는 코드이나 현재 코드에서는 오히려 util 성능 하락 (66점)
+    //      앞쪽까지도 확인하는 코드이나 현재 코드에서는 오히려 util 성능 하락 (66점)
     char *prev_po = PREV_BLKP(ptr);        // 이전 블록의 페이로드 주소 구하기
 
     if (GET_ALLOC(HDRP(prev_po)) == 0) {
@@ -344,10 +365,9 @@ void *mm_realloc(void *ptr, size_t size)
                 return prev_po;     // 이동한 데이터의 새 페이로드 주소 반환
         }
     }
-    */
     
     char *cur_pos = mm_malloc(size);        // 요청 크기만큼 새 블록을 할당하고 페이로드 주소 받음
-    if (cur_pos == NULL){
+    if (cur_pos == NULL) {
         return NULL;
     }
     
